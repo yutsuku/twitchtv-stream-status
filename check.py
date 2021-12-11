@@ -17,7 +17,7 @@ def custom_sleep(start_time, attempts, timeout_max_sleep):
     if timeout_max_sleep > 0 and sleep_time > timeout_max_sleep:
         sleep_time = timeout_max_sleep
 
-    jitter = int(sleep_time * 0.1)
+    jitter = int(sleep_time * 0.1) or 1
     jitter = random.randrange(0, jitter)
 
     if random.randrange(0, 1) == 1:
@@ -31,28 +31,28 @@ def custom_sleep(start_time, attempts, timeout_max_sleep):
                 sleep_time = 60
     return sleep_time, wasted_time
 
-def get_stream_status(video_id, api_key):
-    data = json.dumps({
-        "videoId": video_id,
-        "context": {
-            "client": {
-                "hl": "en",
-                "gl": "JP",
-                "clientName": "WEB",
-                "clientVersion": "2.20211102.01.00",
-                "timeZone": "UTC"
-            }
-        },
-        "heartbeatRequestParams": {
-            "heartbeatChecks": ["HEARTBEAT_CHECK_TYPE_LIVE_STREAM_STATUS"]
-        }
-    }).encode('utf8')
+def get_stream_status(full_url, client_id):
+    # https://twitch.tv/some_user => some_user
+    full_url = full_url.split('/')[3]
 
-    req = request.Request('https://www.youtube.com/youtubei/v1/player/heartbeat?alt=json&key={}'.format(api_key), data=data)
-    req.add_header('Content-Type', 'application/json')
+    data = json.dumps([{
+        "operationName": "UseLive",
+        "variables": {
+            "channelLogin": full_url
+        },
+        "extensions": {
+            "persistedQuery": {
+                "version": 1,
+                "sha256Hash": "639d5f11bfb8bf3053b424d9ef650d04c4ebb7d94711d644afb08fe9a0fad5d9"
+            }
+        }
+    }]).encode('utf8')
+
+    req = request.Request('https://gql.twitch.tv/gql', data=data)
+    req.add_header('Client-Id', client_id)
 
     result = None
-    status = None # LIVE_STREAM_OFFLINE | OK
+    status = None
     startTime = None
 
     try:
@@ -70,80 +70,42 @@ def get_stream_status(video_id, api_key):
         pass
 
     try:
-        status = result['playabilityStatus']['status']
+        status = result[0]['data']['user']['stream']['__typename']
     except:
         pass
 
     try:
-        startTime = int(result['playabilityStatus']['liveStreamability']['liveStreamabilityRenderer']['offlineSlate']['liveStreamOfflineSlateRenderer']['scheduledStartTime'])
+        startTime = result[0]['data']['user']['stream']['createdAt']
     except:
         pass
 
     return status, startTime
 
-
-
-def get_metadata(video_id, api_key, connection_timeout):
-    data = json.dumps({
-        'videoId': video_id,
-        'context': {
-            'client': {
-                'utcOffsetMinutes': 540,
-                'clientName': 'WEB',
-                'clientVersion': '2.20211009.11.00',
-                'hl': 'en',
-                'gl':'JP',
-                'timeZone':'Asia/Tokyo',
-            },
-        },
-    }).encode('utf8')
-
-    req = request.Request('https://www.youtube.com/youtubei/v1/updated_metadata?key={}'.format(api_key), data=data)
-    req.add_header('Content-Type', 'application/json')
-    result = None
-
-    try:
-        res = request.urlopen(req)
-        result = json.loads(res.read().decode('utf8'))
-    except:
-        pass
-
-    return result
-
-def get_keys(url, quiet=False):
+def get_client_id(url, quiet=False):
     if not quiet:
-        print('Fetching YouTube page...')
+        print('Fetching page...')
 
-    regex_canonical = r"<link rel=\"canonical\" href=\"https://www\.youtube\.com/watch\?v=(.{11})\">"
-    regex_api_key = r"\"innertubeApiKey\":\"([^\"]+)\""
-    youtube_page = None
-    video_id = None
-    api_key = None
+    regex_client_id = r"clientId=\"([^\"]+)\""
+    page_source = None
+    client_id = None
 
     try:
-        youtube_page = request.urlopen(url).read().decode('utf8')
+        page_source = request.urlopen(url).read().decode('utf8')
     except:
-        return video_id, api_key
+        return client_id
         pass
 
-    video_id = re.findall(regex_canonical, youtube_page, re.MULTILINE)
-    api_key = re.findall(regex_api_key, youtube_page, re.MULTILINE)
+    client_id = re.findall(regex_client_id, page_source, re.MULTILINE)
 
-    if len(video_id) == 0:
-        video_id = None
+    if len(client_id) == 0:
+        client_id = None
     else:
-        video_id = video_id[0]
+        client_id = client_id[0]
 
-    if len(api_key) == 0:
-        api_key = None
-    else:
-        api_key = api_key[0]
-
-    return video_id, api_key
+    return client_id
 
 def is_stream_online(url, connection_timeout, quiet=False, wait=False, verbose=False, timeout_max_sleep=0):
-    video_id = None
-    api_key = None
+    client_id = None
     start_time = time.time()
     attempts = 0
 
@@ -151,9 +113,9 @@ def is_stream_online(url, connection_timeout, quiet=False, wait=False, verbose=F
         attempts += 1
         if verbose:
             print('[{}] Attempting to fetch basic information. Attempt {}'.format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), attempts))
-        video_id, api_key = get_keys(url, quiet)
+        client_id = get_client_id(url, quiet)
 
-        if video_id and api_key:
+        if client_id:
             break
         else:
             sleep_time, wasted_time = custom_sleep(start_time, attempts, timeout_max_sleep)
@@ -165,58 +127,35 @@ def is_stream_online(url, connection_timeout, quiet=False, wait=False, verbose=F
             time.sleep(sleep_time)
 
     if verbose:
-        print('Video ID:', video_id)
-        print('Found API Key', api_key)
+        print('Client ID:', client_id)
 
-    # Send heartbeat
     if not quiet:
         print('Checking for stream status')
 
     attempts = 0
 
     while True:
-        heartbeat = get_metadata(video_id, api_key, connection_timeout)
-        status, startTime = get_stream_status(video_id, api_key)
-
-        if heartbeat is None:
-            if attempts > 10:
-                if not quiet:
-                    print('Giving up. Is the network unstable?')
-                return False
-
-            attempts += 1
-            time.sleep(60)
-            continue
-        else:
-            attempts = 0
-
+        attempts += 1
         if verbose:
-            print(json.dumps(heartbeat, indent=2))
+            print('[{}] Fetching stream status. Attempt {}'.format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), attempts))
 
-        reason = None
-        for action in heartbeat['actions']:
-            if 'updateDateTextAction' in action:
-                reason = action['updateDateTextAction']['dateText']['simpleText']
-
-        is_online = 'streaming' in reason or 'in progress' in reason
+        status, startTime = get_stream_status(url, client_id)
+        is_online = status
 
         if not quiet:
-            print(reason)
+            print(status)
 
         if not wait or is_online:
             return is_online
 
-        if startTime:
-            now = int(time.time())
-            startsIn = startTime - now - 1
-            if startsIn > 0:
-                if not quiet:
-                    print('Waiting {} seconds for stream...'.format(startsIn))
-                time.sleep(startsIn)
-            else:
-                time.sleep(1)
-        else:
-            time.sleep(5)
+        if time.time() > start_time + connection_timeout:
+            raise Exception('Unable to fetch stream status after {} seconds and {} attempts'.format(wasted_time, attempts))
+
+        if wait and not is_online:
+            sleep_time, wasted_time = custom_sleep(start_time, attempts, timeout_max_sleep)
+            if verbose:
+                print('zZz... ', sleep_time)
+            time.sleep(sleep_time)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -228,13 +167,12 @@ if __name__ == '__main__':
     parser.add_argument('-w', '--wait', help='Keep polling until the stream starts, then exit', action='store_true')
     parser.add_argument('--timeout', help='How long to wait in case network fails (in seconds). 5 minutes by default', type=int, nargs='?', const=300, default=300)
     parser.add_argument('--timeout-max-sleep', help='Maximum allowed idle time (in seconds) between failed network requests. Infinite by default', type=int, nargs='?', const=0, default=0)
-    parser.add_argument('url', help='YouTube url', type=str)
+    parser.add_argument('url', help='https://twitch.tv/your_profile', type=str)
 
     args = parser.parse_args()
 
     if args.verbose:
         print(args)
-
     try:
         if is_stream_online(args.url, args.timeout, quiet=args.quiet, wait=args.wait, verbose=args.verbose, timeout_max_sleep=args.timeout_max_sleep):
             sys.exit(0)

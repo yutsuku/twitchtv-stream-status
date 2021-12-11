@@ -1,12 +1,12 @@
-# youtube-stream-status
+# twitch-stream-status
 
-Small Python3 script to check the status of a YouTube live stream.
+Small Python3 script to check the status of a twitch.tv live stream.
 
 ```
 Usage: python3 check.py [-h] [-q | --verbose] [-w] [--timeout [TIMEOUT]] [--timeout-max-sleep [TIMEOUT_MAX_SLEEP]] url
 
 positional arguments:
-  url                   YouTube url
+  url                   twitch url
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -25,5 +25,5 @@ The script will exit with code `0` if the stream is online. If used without `--w
 Automatically start downloading a live stream once it goes online
 
 ```
-STREAM_URL=<url> python3 ./check.py --wait "$STREAM_URL" && ffmpeg -i $(youtube-dl -g "$STREAM_URL") -c copy stream.ts
+STREAM_URL=<url> python3 ./check.py --wait "$STREAM_URL" && yt-dlp $STREAM_URL
 ```
